@@ -1,4 +1,30 @@
-public with sharing class ConnectedVehicleDashboardCtrl {
+/**
+ * ConnectedVehicleDashboardCtrl
+ * -----------------------------
+ * Purpose
+ *  - Serve the Connected Vehicle Dashboard (LWC) with either:
+ *      SNAPSHOT mode (<= threshold vehicles) OR
+ *      PAGINATED mode (> threshold vehicles with keyset pagination).
+ *  - Orchestrate Platform Cache to minimize DB/API calls while keeping data fresh.
+ *
+ * Design notes (unchanged)
+ *  - Uses Custom Metadata (ConnectedVehicleSettings__mdt.Default) for knobs:
+ *      - SnapshotThreshold__c: max vehicles for full snapshot
+ *      - PageSize__c         : default page size (can be overridden by LWC param)
+ *      - CacheTtlSec__c      : org cache TTL
+ *      - Use_Mock__c         : (demo-only) bypass external callouts
+ *  - Enforces CRUD/FLS on Vehicle__c reads where applicable.
+ *  - Keyset pagination (VIN__c, Id) avoids OFFSET limits.
+ *
+ * NEW (2025-11-07): Versioned cache keys
+ *  - Problem fixed: “Refresh / Load More reverts UI to old values” when some page caches survive.
+ *  - Approach: Introduce a per-Account cache version and include it in ALL cache keys & page tokens.
+ *      * Handler bumps the version upon PE updates → instantly invalidates ALL prior cache keys.
+ *      * Controller embeds version in page tokens and ignores tokens from older versions.
+ *  - Benefit: One atomic change wipes both snapshot and every paginated page cache for that Account.
+ */
+
+ public with sharing class ConnectedVehicleDashboardCtrl {
 
     // ---------- DTOs ----------
     public class VehicleRow {
@@ -23,7 +49,8 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         @AuraEnabled public Datetime cachedAt;
         @AuraEnabled public Boolean fromCache;
     }
-    private class PageToken { String v; Id i; }   // last VIN + last Id for keyset pagination
+    // NEW: version-aware token adds "ver"
+    private class PageToken { String v; Id i; Integer ver; }   // last VIN + last Id + cache version
 
     // ---------- Settings (Custom Metadata: ConnectedVehicleSettings__mdt.Default) ----------
     private static ConnectedVehicleSettings__mdt S() {
@@ -31,35 +58,64 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         if (s == null) {
             s = new ConnectedVehicleSettings__mdt(
                 Use_Mock__c = false, SnapshotThreshold__c = 500,
-                PageSize__c = 200, CacheTtlSec__c = 25
+                PageSize__c = 200, CacheTtlSec__c = 300
             );
         }
         return s;
     }
     private static Integer threshold()       { return (Integer) (S().SnapshotThreshold__c == null ? 500 : S().SnapshotThreshold__c.intValue()); }
     private static Integer pageSizeDefault() { return (Integer) (S().PageSize__c == null ? 200 : S().PageSize__c.intValue()); }
-    private static Integer cacheTtl()        { return (Integer) (S().CacheTtlSec__c == null ? 25  : S().CacheTtlSec__c.intValue()); }
+    private static Integer cacheTtl()        { return (Integer) (S().CacheTtlSec__c == null ? 300 : S().CacheTtlSec__c.intValue()); }
 
     private static final Integer PAGE_SIZE_MAX = 1000;
-    private static final String  ORG_PARTITION = 'ConnectedVehicles';
 
-    // ---------- Cache key helpers (MUST be alphanumeric only) ----------
-    private static String acctKey(Id accountId) {
-        // e.g., acct001XXXXXXXXXXXX
-        return 'acct' + String.valueOf(accountId);
+    // ---------- NEW: Versioned cache helpers (per-Account) ----------
+    // Partition shared with handler
+    private static final String ORG_PARTITION = 'ConnectedVehicles';
+
+    // Per-account version marker key (long TTL); bumps are done by the handler
+    private static String verKey(Id accountId) {
+        return 'acct' + String.valueOf(accountId) + ':ver';
     }
-    private static String hashToken(String tok) {
-        if (String.isBlank(tok)) return 'FIRST';
-        Blob d = Crypto.generateDigest('SHA-256', Blob.valueOf(tok));
-        return EncodingUtil.convertToHex(d).substring(0, 16); // 0-9a-f
+    // Read per-account version (default 1 if missing or cache unavailable)
+    private static Integer acctVersion(Id accountId) {
+        try {
+            Cache.OrgPartition p = Cache.Org.getPartition(ORG_PARTITION);
+            Object o = p.get(verKey(accountId));
+            if (o == null) return 1;
+            return (Integer) o;
+        } catch (Exception e) {
+            return 1;
+        }
     }
+    // Prefix for all account+version scoped keys, e.g., "acct001...:v3:"
+    private static String acctPrefix(Id accountId) {
+        return 'acct' + String.valueOf(accountId) + ':v' + String.valueOf(acctVersion(accountId)) + ':';
+    }
+    // Concrete keys (alphanumeric + colon)
+    private static String snapKey(Id accountId) {
+        return acctPrefix(accountId) + 'snapshot';
+    }
+    private static String pageKey(Id accountId, Integer pageSize, String tokenB64) {
+        String tok = String.isBlank(tokenB64) ? 'FIRST' : hashToken(tokenB64);
+        return acctPrefix(accountId) + 'ps' + String.valueOf(pageSize) + ':tok' + tok;
+    }
+
+    // ---------- Cache accessors (best-effort) ----------
     private static Object cacheGet(String key) {
         try { return Cache.Org.getPartition(ORG_PARTITION).get(key); }
         catch (Exception e) { return null; }
     }
     private static void cachePut(String key, Object value, Integer seconds) {
-        try { Cache.Org.getPartition(ORG_PARTITION).put(key, value, seconds); }
+        try { Cache.Org.getPartition(ORG_PARTITION).put(key, value, Math.max(seconds, 300)); } // enforce 300s min
         catch (Exception e) { /* best-effort */ }
+    }
+
+    // ---------- Hash helper for token display keys ----------
+    private static String hashToken(String tok) {
+        if (String.isBlank(tok)) return 'FIRST';
+        Blob d = Crypto.generateDigest('SHA-256', Blob.valueOf(tok));
+        return EncodingUtil.convertToHex(d).substring(0, 16); // 0-9a-f
     }
 
     // ---------- Public: init (first render) ----------
@@ -78,7 +134,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
 
         if (total <= threshold()) {
             // SNAPSHOT: read telemetry directly from Vehicle__c, then cache
-            String cacheKey = acctKey(accountId) + 'snapshot';
+            String cacheKey = snapKey(accountId);
             InitResult cached = (InitResult) cacheGet(cacheKey);
             if (cached != null) { cached.fromCache = true; return cached; }
 
@@ -114,7 +170,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
             for (Vehicle__c v : page) out.add(toRow(v));
 
             String nextTok = page.isEmpty() ? null
-                : encodeTok(page.get(page.size()-1).VIN__c, page.get(page.size()-1).Id);
+                : encodeTok(page.get(page.size()-1).VIN__c, page.get(page.size()-1).Id, accountId);
 
             InitResult res = new InitResult();
             res.mode = 'PAGINATED';
@@ -134,11 +190,17 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         if (accountId == null) throw new AuraHandledException('AccountId is required.');
         Integer pageSize = normalizePageSize(pageSizeOpt);
 
-        String cacheKey = acctKey(accountId) + 'ps' + pageSize + 'tok' + hashToken(pageTokenB64);
+        // Versioned page key
+        String cacheKey = pageKey(accountId, pageSize, pageTokenB64);
         PageResult cached = (PageResult) cacheGet(cacheKey);
         if (cached != null) { cached.fromCache = true; return cached; }
 
+        // Decode token and validate version: tokens from older versions are ignored (restart pagination)
         PageToken pt = decodeTok(pageTokenB64);
+        if (pt != null && pt.ver != null && pt.ver != acctVersion(accountId)) {
+            pt = null; // force restart
+        }
+
         List<Vehicle__c> page = queryVehiclePage(accountId, pageSize, pt);
 
         PageResult res = new PageResult();
@@ -153,7 +215,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         }
 
         for (Vehicle__c v : page) res.vehicles.add(toRow(v));
-        res.nextToken = encodeTok(page.get(page.size()-1).VIN__c, page.get(page.size()-1).Id);
+        res.nextToken = encodeTok(page.get(page.size()-1).VIN__c, page.get(page.size()-1).Id, accountId);
 
         cachePut(cacheKey, res, cacheTtl());
         return res;
@@ -197,9 +259,13 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         }
     }
 
-    // ---------- Token helpers ----------
-    private static String encodeTok(String lastVin, Id lastId) {
-        Map<String, Object> m = new Map<String, Object>{ 'v' => lastVin, 'i' => (String) lastId };
+    // ---------- NEW: Token helpers (embed version to avoid cross-version reuse) ----------
+    private static String encodeTok(String lastVin, Id lastId, Id accountId) {
+        Map<String, Object> m = new Map<String, Object>{
+            'v' => lastVin,
+            'i' => (String) lastId,
+            'ver' => acctVersion(accountId)
+        };
         return EncodingUtil.base64Encode(Blob.valueOf(JSON.serialize(m)));
     }
     private static PageToken decodeTok(String b64) {
@@ -211,6 +277,8 @@ public with sharing class ConnectedVehicleDashboardCtrl {
             pt.v = (String) m.get('v');
             String idStr = (String) m.get('i');
             pt.i = (idStr == null) ? null : (Id) idStr;
+            Object vv = m.get('ver');
+            pt.ver = (vv == null) ? null : (Integer) vv;
             return pt;
         } catch (Exception e) {
             return null;

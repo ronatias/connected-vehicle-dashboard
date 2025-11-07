@@ -1,29 +1,52 @@
 <template>
-    <lightning-card title="Connected Vehicle Dashboard">
-      <div class="slds-p-around_small">
-        <lightning-button label="Refresh" onclick={handleRefresh}></lightning-button>
+    <lightning-card title="Connected Vehicle Dashboard" icon-name="standard:account">
+      <!-- Header: counts + actions -->
+      <div class="slds-p-horizontal_small slds-p-vertical_x-small slds-grid slds-grid_align-spread slds-wrap">
+        <div class="slds-text-body_small">
+          <span>Showing {loadedCount} of {totalCount}</span>
+          <template if:true={cachedAt}>
+            <span class="slds-m-left_small slds-text-color_weak">Cached: {cachedAt}</span>
+          </template>
+        </div>
   
-        <template if:true={isLoadingInitial}>
-          <lightning-spinner size="small" alternative-text="Loading"></lightning-spinner>
-        </template>
+        <div>
+          <lightning-button
+            variant="neutral"
+            label="Refresh"
+            class="slds-m-right_x-small"
+            onclick={handleRefresh}
+            disabled={disableRefresh}
+          ></lightning-button>
   
-        <lightning-datatable
-          key-field="vin"
-          data={rows}
-          columns={columns}
-          enable-infinite-loading={isPaginated}
-          is-loading={isLoadingMore}
-          onloadmore={handleLoadMore}
-          hide-checkbox-column>
-        </lightning-datatable>
-  
-        <div class="slds-text-body_small slds-m-top_x-small">
-          <template if:true={cachedAt}>Cached: {cachedAt}</template>
-          <template if:true={fromCache}>&nbsp;(from cache)</template>
-          <template if:true={isPaginated}>&nbsp;• {loadedCount} of {totalCount}</template>
-          <template if:true={noMoreData}>&nbsp;• All vehicles loaded</template>
+          <lightning-button
+            variant="brand"
+            label="Load More"
+            onclick={handleLoadMore}
+            disabled={disableLoadMore}
+          ></lightning-button>
         </div>
       </div>
+  
+      <!-- Data table (no infinite loading attributes) -->
+      <lightning-datatable
+        key-field="vin"
+        data={rows}
+        columns={columns}
+        hide-checkbox-column
+        show-row-number-column
+      >
+      </lightning-datatable>
+  
+      <!-- Status messages -->
+      <template if:true={isLoadingInitial}>
+        <div class="slds-p-around_small slds-text-body_small slds-text-color_weak">Loading…</div>
+      </template>
+      <template if:true={isLoadingMore}>
+        <div class="slds-p-around_small slds-text-body_small slds-text-color_weak">Loading more…</div>
+      </template>
+      <template if:true={noMoreData}>
+        <div class="slds-p-around_small slds-text-body_small slds-text-color_weak">All vehicles loaded.</div>
+      </template>
     </lightning-card>
   </template>
   

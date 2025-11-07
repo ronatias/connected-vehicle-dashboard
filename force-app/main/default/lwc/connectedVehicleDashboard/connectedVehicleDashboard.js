@@ -4,7 +4,7 @@ import getVehiclesPage from '@salesforce/apex/ConnectedVehicleDashboardCtrl.getV
 import { subscribe, onError, isEmpEnabled } from 'lightning/empApi';
 
 export default class ConnectedVehicleDashboard extends LightningElement {
-  @api recordId; // Account Id
+  @api recordId;
 
   @track rows = [];
   @track isLoadingInitial = true;
@@ -24,8 +24,10 @@ export default class ConnectedVehicleDashboard extends LightningElement {
     { label: 'Fuel (%)', fieldName: 'fuelLevelPct', type: 'number' },
     { label: 'Mileage (km)', fieldName: 'mileageKm', type: 'number' },
     { label: 'Software Version', fieldName: 'softwareVersion' },
-    { label: 'Updated', fieldName: 'sourceTs', type: 'date',
-      typeAttributes: { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' } }
+    {
+      label: 'Updated', fieldName: 'sourceTs', type: 'date',
+      typeAttributes: { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }
+    }
   ];
 
   channelName = '/event/Vehicle_Status__e';
@@ -36,25 +38,35 @@ export default class ConnectedVehicleDashboard extends LightningElement {
     this.subscribeEvents();
   }
 
+  get disableRefresh() {
+    return this.isLoadingInitial;
+  }
+  get disableLoadMore() {
+    return this.noMoreData || this.isLoadingMore || !this.isPaginated;
+  }
+  
+
   async init() {
     this.isLoadingInitial = true;
     this.rows = [];
     this.noMoreData = false;
     this.nextToken = null;
+
     try {
-      const res = await initDashboard({ accountId: this.recordId, pageSizeOpt: 200 });
+      const res = await initDashboard({ accountId: this.recordId, pageSizeOpt: null });
       this.totalCount = res?.totalCount ?? 0;
-      this.cachedAt = res?.cachedAt;
-      this.fromCache = !!res?.fromCache;
+      this.cachedAt   = res?.cachedAt;
+      this.fromCache  = !!res?.fromCache;
 
       if (res?.mode === 'SNAPSHOT') {
         this.isPaginated = false;
         this.rows = res?.snapshot ?? [];
+        this.noMoreData = true; // nothing to paginate
       } else {
         this.isPaginated = true;
         this.rows = res?.snapshot ?? [];
         this.nextToken = res?.nextToken || null;
-        if (!this.nextToken) this.noMoreData = true;
+        this.noMoreData = !this.nextToken;
       }
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -67,17 +79,20 @@ export default class ConnectedVehicleDashboard extends LightningElement {
   async handleLoadMore() {
     if (!this.isPaginated || this.noMoreData || this.isLoadingMore) return;
     if (!this.nextToken) { this.noMoreData = true; return; }
+
     this.isLoadingMore = true;
     try {
-      const res = await getVehiclesPage({ accountId: this.recordId, pageSizeOpt: 200, pageTokenB64: this.nextToken });
-      const more = res?.vehicles ?? [];
-      this.rows = [...this.rows, ...more];
+      const res = await getVehiclesPage({ accountId: this.recordId, pageSizeOpt: null, pageTokenB64: this.nextToken });      const more = res?.vehicles ?? [];
+      // append
+      this.rows = this.rows.concat(more);
+      // advance
       this.nextToken = res?.nextToken || null;
-      this.cachedAt = res?.cachedAt;
+      this.cachedAt  = res?.cachedAt;
       this.fromCache = !!res?.fromCache;
       if (!this.nextToken) this.noMoreData = true;
     } catch (e) {
-      console.error('getVehiclesPage error', e); // eslint-disable-line no-console
+      // eslint-disable-next-line no-console
+      console.error('getVehiclesPage error', e);
     } finally {
       this.isLoadingMore = false;
     }
@@ -91,10 +106,19 @@ export default class ConnectedVehicleDashboard extends LightningElement {
     const callback = (msg) => {
       const p = msg?.data?.payload;
       if (!p || p.AccountId__c !== this.recordId) return;
+
       const idx = this.rows.findIndex(r => r.vin === p.VIN__c);
-      const updated = { vin: p.VIN__c, fuelLevelPct: p.FuelLevelPct__c, mileageKm: p.MileageKm__c, softwareVersion: p.SoftwareVersion__c, sourceTs: p.SourceTs__c };
+      const updated = {
+        vin: p.VIN__c,
+        fuelLevelPct: p.FuelLevelPct__c,
+        mileageKm: p.MileageKm__c,
+        softwareVersion: p.SoftwareVersion__c,
+        sourceTs: p.SourceTs__c
+      };
       if (idx >= 0) {
-        const clone = [...this.rows]; clone[idx] = { ...clone[idx], ...updated }; this.rows = clone;
+        const clone = [...this.rows];
+        clone[idx] = { ...clone[idx], ...updated };
+        this.rows = clone;
       }
     };
     subscribe(this.channelName, replayId, callback).then(sub => { this.subscription = sub; });
