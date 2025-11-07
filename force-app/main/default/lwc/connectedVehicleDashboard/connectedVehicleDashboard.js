@@ -20,15 +20,23 @@ export default class ConnectedVehicleDashboard extends LightningElement {
   get loadedCount() { return this.rows?.length ?? 0; }
 
   columns = [
-    { label: 'VIN', fieldName: 'vin' },
-    { label: 'Fuel (%)', fieldName: 'fuelLevelPct', type: 'number' },
-    { label: 'Mileage (km)', fieldName: 'mileageKm', type: 'number' },
-    { label: 'Software Version', fieldName: 'softwareVersion' },
-    {
-      label: 'Updated', fieldName: 'sourceTs', type: 'date',
-      typeAttributes: { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }
-    }
+    { label: 'VIN', fieldName: 'vin',
+      cellAttributes: { alignment: 'left' } },
+  
+    { label: 'Fuel (%)', fieldName: 'fuelLevelPct', type: 'number',
+      cellAttributes: { alignment: 'left' } },
+  
+    { label: 'Mileage (km)', fieldName: 'mileageKm', type: 'number',
+      cellAttributes: { alignment: 'left' } },
+  
+    { label: 'Software Version', fieldName: 'softwareVersion',
+      cellAttributes: { alignment: 'left' } },
+  
+    { label: 'Updated', fieldName: 'sourceTs', type: 'date',
+      typeAttributes: { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' },
+      cellAttributes: { alignment: 'left' } },
   ];
+  
 
   channelName = '/event/Vehicle_Status__e';
   subscription;
@@ -98,7 +106,9 @@ export default class ConnectedVehicleDashboard extends LightningElement {
     }
   }
 
-  handleRefresh() { this.init(); }
+  handleRefresh() { 
+    this.init(); 
+}
 
   subscribeEvents() {
     if (!isEmpEnabled) return;
