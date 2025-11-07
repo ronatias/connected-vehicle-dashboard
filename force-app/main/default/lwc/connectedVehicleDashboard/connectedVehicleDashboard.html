@@ -1,0 +1,29 @@
+<template>
+    <lightning-card title="Connected Vehicle Dashboard">
+      <div class="slds-p-around_small">
+        <lightning-button label="Refresh" onclick={handleRefresh}></lightning-button>
+  
+        <template if:true={isLoadingInitial}>
+          <lightning-spinner size="small" alternative-text="Loading"></lightning-spinner>
+        </template>
+  
+        <lightning-datatable
+          key-field="vin"
+          data={rows}
+          columns={columns}
+          enable-infinite-loading={isPaginated}
+          is-loading={isLoadingMore}
+          onloadmore={handleLoadMore}
+          hide-checkbox-column>
+        </lightning-datatable>
+  
+        <div class="slds-text-body_small slds-m-top_x-small">
+          <template if:true={cachedAt}>Cached: {cachedAt}</template>
+          <template if:true={fromCache}>&nbsp;(from cache)</template>
+          <template if:true={isPaginated}>&nbsp;• {loadedCount} of {totalCount}</template>
+          <template if:true={noMoreData}>&nbsp;• All vehicles loaded</template>
+        </div>
+      </div>
+    </lightning-card>
+  </template>
+  
