@@ -17,14 +17,14 @@
  *  - Keyset pagination (VIN__c, Id) avoids OFFSET limits.
  *
  * NEW (2025-11-07): Versioned cache keys
- *  - Problem fixed: “Refresh / Load More reverts UI to old values” when some page caches survive.
- *  - Approach: Introduce a per-Account cache version and include it in ALL cache keys & page tokens.
- *      * Handler bumps the version upon PE updates → instantly invalidates ALL prior cache keys.
- *      * Controller embeds version in page tokens and ignores tokens from older versions.
- *  - Benefit: One atomic change wipes both snapshot and every paginated page cache for that Account.
+ *  - Introduce a per-Account cache version and include it in ALL cache keys & page tokens.
+ *    Handler bumps the version on PE updates → invalidates prior cache keys.
+ *
+ * NEW: Nonce-friendly signatures
+ *  - @AuraEnabled methods now accept String clientNonce.
+ *  - Server ignores the value; it only busts the client storable cache key.
  */
-
- public with sharing class ConnectedVehicleDashboardCtrl {
+public with sharing class ConnectedVehicleDashboardCtrl {
 
     // ---------- DTOs ----------
     public class VehicleRow {
@@ -49,8 +49,8 @@
         @AuraEnabled public Datetime cachedAt;
         @AuraEnabled public Boolean fromCache;
     }
-    // NEW: version-aware token adds "ver"
-    private class PageToken { String v; Id i; Integer ver; }   // last VIN + last Id + cache version
+    // version-aware token
+    private class PageToken { String v; Id i; Integer ver; }
 
     // ---------- Settings (Custom Metadata: ConnectedVehicleSettings__mdt.Default) ----------
     private static ConnectedVehicleSettings__mdt S() {
@@ -69,15 +69,12 @@
 
     private static final Integer PAGE_SIZE_MAX = 1000;
 
-    // ---------- NEW: Versioned cache helpers (per-Account) ----------
-    // Partition shared with handler
+    // ---------- Versioned cache helpers (per-Account) ----------
     private static final String ORG_PARTITION = 'ConnectedVehicles';
 
-    // Per-account version marker key (long TTL); bumps are done by the handler
     private static String verKey(Id accountId) {
         return 'acct' + String.valueOf(accountId) + ':ver';
     }
-    // Read per-account version (default 1 if missing or cache unavailable)
     private static Integer acctVersion(Id accountId) {
         try {
             Cache.OrgPartition p = Cache.Org.getPartition(ORG_PARTITION);
@@ -88,11 +85,9 @@
             return 1;
         }
     }
-    // Prefix for all account+version scoped keys, e.g., "acct001...:v3:"
     private static String acctPrefix(Id accountId) {
         return 'acct' + String.valueOf(accountId) + ':v' + String.valueOf(acctVersion(accountId)) + ':';
     }
-    // Concrete keys (alphanumeric + colon)
     private static String snapKey(Id accountId) {
         return acctPrefix(accountId) + 'snapshot';
     }
@@ -107,20 +102,21 @@
         catch (Exception e) { return null; }
     }
     private static void cachePut(String key, Object value, Integer seconds) {
-        try { Cache.Org.getPartition(ORG_PARTITION).put(key, value, Math.max(seconds, 300)); } // enforce 300s min
+        try { Cache.Org.getPartition(ORG_PARTITION).put(key, value, Math.max(seconds, 300)); }
         catch (Exception e) { /* best-effort */ }
     }
 
-    // ---------- Hash helper for token display keys ----------
+    // ---------- Hash helper ----------
     private static String hashToken(String tok) {
         if (String.isBlank(tok)) return 'FIRST';
         Blob d = Crypto.generateDigest('SHA-256', Blob.valueOf(tok));
-        return EncodingUtil.convertToHex(d).substring(0, 16); // 0-9a-f
+        return EncodingUtil.convertToHex(d).substring(0, 16);
     }
 
     // ---------- Public: init (first render) ----------
     @AuraEnabled(cacheable=true)
-    public static InitResult initDashboard(Id accountId, Integer pageSizeOpt) {
+    public static InitResult initDashboard(Id accountId, Integer pageSizeOpt, String clientNonce) {
+        // clientNonce is intentionally ignored; its presence changes the client storable cache key.
         if (accountId == null) throw new AuraHandledException('AccountId is required.');
         if (!Schema.sObjectType.Vehicle__c.isAccessible())
             throw new AuraHandledException('Access denied.');
@@ -186,16 +182,15 @@
 
     // ---------- Public: get next page ----------
     @AuraEnabled(cacheable=true)
-    public static PageResult getVehiclesPage(Id accountId, Integer pageSizeOpt, String pageTokenB64) {
+    public static PageResult getVehiclesPage(Id accountId, Integer pageSizeOpt, String pageTokenB64, String clientNonce) {
+        // clientNonce is intentionally ignored; its presence changes the client storable cache key.
         if (accountId == null) throw new AuraHandledException('AccountId is required.');
         Integer pageSize = normalizePageSize(pageSizeOpt);
 
-        // Versioned page key
         String cacheKey = pageKey(accountId, pageSize, pageTokenB64);
         PageResult cached = (PageResult) cacheGet(cacheKey);
         if (cached != null) { cached.fromCache = true; return cached; }
 
-        // Decode token and validate version: tokens from older versions are ignored (restart pagination)
         PageToken pt = decodeTok(pageTokenB64);
         if (pt != null && pt.ver != null && pt.ver != acctVersion(accountId)) {
             pt = null; // force restart
@@ -259,7 +254,7 @@
         }
     }
 
-    // ---------- NEW: Token helpers (embed version to avoid cross-version reuse) ----------
+    // ---------- Token helpers (embed version to avoid cross-version reuse) ----------
     private static String encodeTok(String lastVin, Id lastId, Id accountId) {
         Map<String, Object> m = new Map<String, Object>{
             'v' => lastVin,

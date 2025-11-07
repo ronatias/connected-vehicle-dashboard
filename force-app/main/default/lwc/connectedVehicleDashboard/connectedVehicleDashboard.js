@@ -61,7 +61,7 @@ export default class ConnectedVehicleDashboard extends LightningElement {
     this.nextToken = null;
 
     try {
-      const res = await initDashboard({ accountId: this.recordId, pageSizeOpt: null });
+      const res = await initDashboard({ accountId: this.recordId, pageSizeOpt: null, clientNonce: Date.now().toString()});
       this.totalCount = res?.totalCount ?? 0;
       this.cachedAt   = res?.cachedAt;
       this.fromCache  = !!res?.fromCache;
@@ -90,7 +90,7 @@ export default class ConnectedVehicleDashboard extends LightningElement {
 
     this.isLoadingMore = true;
     try {
-      const res = await getVehiclesPage({ accountId: this.recordId, pageSizeOpt: null, pageTokenB64: this.nextToken });      const more = res?.vehicles ?? [];
+      const res = await getVehiclesPage({ accountId: this.recordId, pageSizeOpt: null, pageTokenB64: this.nextToken, clientNonce: Date.now().toString() });      const more = res?.vehicles ?? [];
       // append
       this.rows = this.rows.concat(more);
       // advance
