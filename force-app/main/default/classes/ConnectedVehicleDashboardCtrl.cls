@@ -7,22 +7,32 @@
  *      PAGINATED mode (> threshold vehicles with keyset pagination).
  *  - Orchestrate Platform Cache to minimize DB/API calls while keeping data fresh.
  *
- * Design notes (unchanged)
+ * Design notes
  *  - Uses Custom Metadata (ConnectedVehicleSettings__mdt.Default) for knobs:
  *      - SnapshotThreshold__c: max vehicles for full snapshot
  *      - PageSize__c         : default page size (can be overridden by LWC param)
- *      - CacheTtlSec__c      : org cache TTL
- *      - Use_Mock__c         : (demo-only) bypass external callouts
+ *      - CacheTtlSec__c      : org cache TTL (min enforced at 300s to match Org Cache rules)
+ *      - Use_Mock__c         : DEMO mode switch (true = read Vehicle__c; false = call Mule)
  *  - Enforces CRUD/FLS on Vehicle__c reads where applicable.
  *  - Keyset pagination (VIN__c, Id) avoids OFFSET limits.
  *
- * NEW (2025-11-07): Versioned cache keys
- *  - Introduce a per-Account cache version and include it in ALL cache keys & page tokens.
- *    Handler bumps the version on PE updates → invalidates prior cache keys.
+ * Versioned cache keys
+ *  - Include a per-Account cache version in cache keys & page tokens.
+ *    (Your VehicleStatusHandler can bump/evict snapshot keys on PE updates. Paginated keys expire via TTL.)
  *
- * NEW: Nonce-friendly signatures
- *  - @AuraEnabled methods now accept String clientNonce.
- *  - Server ignores the value; it only busts the client storable cache key.
+ * Nonce-friendly signatures
+ *  - @AuraEnabled methods accept String clientNonce. Server ignores it; it exists only to change the
+ *    Lightning Data Service storable cache key on demand (e.g., when pressing the LWC Refresh button).
+ *
+ * Demo vs Real (Use_Mock__c)
+ *  - DEMO (true): Snapshot/page rows are built from your current Vehicle__c values (what’s already in org).
+ *  - REAL (false): On cache miss, fetch rows from MuleSoft via Named Credential 'Mule_Vehicle_API'
+ *    (GET bulk for snapshot, POST by-vins for page). If Mule returns partials, we fall back to Vehicle__c row.
+ *
+ * Scalability reminders
+ *  - Snapshot is capped: LIMIT Math.min(threshold(), 5000) to prevent CPU/heap blowups.
+ *  - Paginated path queries small pages (default ~200) with sargable keyset predicates.
+ *  - Short TTL cache reduces DB/API hits for hot pages while versioning/eviction keeps data fresh.
  */
 public with sharing class ConnectedVehicleDashboardCtrl {
 
@@ -49,16 +59,19 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         @AuraEnabled public Datetime cachedAt;
         @AuraEnabled public Boolean fromCache;
     }
-    // version-aware token
+    // Version-aware token
     private class PageToken { String v; Id i; Integer ver; }
 
     // ---------- Settings (Custom Metadata: ConnectedVehicleSettings__mdt.Default) ----------
     private static ConnectedVehicleSettings__mdt S() {
         ConnectedVehicleSettings__mdt s = ConnectedVehicleSettings__mdt.getInstance('Default');
         if (s == null) {
+            // Sensible hard defaults for new orgs/demos
             s = new ConnectedVehicleSettings__mdt(
-                Use_Mock__c = false, SnapshotThreshold__c = 500,
-                PageSize__c = 200, CacheTtlSec__c = 300
+                Use_Mock__c = true,
+                SnapshotThreshold__c = 500,
+                PageSize__c = 200,
+                CacheTtlSec__c = 300
             );
         }
         return s;
@@ -66,6 +79,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
     private static Integer threshold()       { return (Integer) (S().SnapshotThreshold__c == null ? 500 : S().SnapshotThreshold__c.intValue()); }
     private static Integer pageSizeDefault() { return (Integer) (S().PageSize__c == null ? 200 : S().PageSize__c.intValue()); }
     private static Integer cacheTtl()        { return (Integer) (S().CacheTtlSec__c == null ? 300 : S().CacheTtlSec__c.intValue()); }
+    private static Boolean useMock()         { ConnectedVehicleSettings__mdt s = S(); return (s != null && s.Use_Mock__c == true); }
 
     private static final Integer PAGE_SIZE_MAX = 1000;
 
@@ -75,6 +89,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
     private static String verKey(Id accountId) {
         return 'acct' + String.valueOf(accountId) + ':ver';
     }
+    // Read per-account version (default 1 if missing or cache unavailable)
     private static Integer acctVersion(Id accountId) {
         try {
             Cache.OrgPartition p = Cache.Org.getPartition(ORG_PARTITION);
@@ -85,6 +100,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
             return 1;
         }
     }
+    // Prefix for all account+version scoped keys, e.g., "acct001...:v3:"
     private static String acctPrefix(Id accountId) {
         return 'acct' + String.valueOf(accountId) + ':v' + String.valueOf(acctVersion(accountId)) + ':';
     }
@@ -102,7 +118,7 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         catch (Exception e) { return null; }
     }
     private static void cachePut(String key, Object value, Integer seconds) {
-        try { Cache.Org.getPartition(ORG_PARTITION).put(key, value, Math.max(seconds, 300)); }
+        try { Cache.Org.getPartition(ORG_PARTITION).put(key, value, Math.max(seconds, 300)); } // enforce 300s min
         catch (Exception e) { /* best-effort */ }
     }
 
@@ -129,21 +145,28 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         ];
 
         if (total <= threshold()) {
-            // SNAPSHOT: read telemetry directly from Vehicle__c, then cache
+            // ---------- SNAPSHOT ----------
             String cacheKey = snapKey(accountId);
             InitResult cached = (InitResult) cacheGet(cacheKey);
             if (cached != null) { cached.fromCache = true; return cached; }
 
-            List<Vehicle__c> recs = [
-                SELECT VIN__c, FuelLevelPct__c, MileageKm__c, SoftwareVersion__c, LastStatusTs__c
-                FROM Vehicle__c
-                WHERE Account__c = :accountId AND IsConnected__c = true
-                ORDER BY VIN__c
-                LIMIT :Math.min(threshold(), 5000)
-            ];
-
-            List<VehicleRow> rows = new List<VehicleRow>();
-            for (Vehicle__c v : recs) rows.add(toRow(v));
+            List<VehicleRow> rows;
+            if (useMock()) {
+                // DEMO: build from existing Vehicle__c (org data)
+                List<Vehicle__c> recs = [
+                    SELECT VIN__c, FuelLevelPct__c, MileageKm__c, SoftwareVersion__c, LastStatusTs__c
+                    FROM Vehicle__c
+                    WHERE Account__c = :accountId AND IsConnected__c = true
+                    ORDER BY VIN__c
+                    LIMIT :Math.min(threshold(), 5000) // performance guardrail
+                ];
+                rows = new List<VehicleRow>();
+                for (Vehicle__c v : recs) rows.add(toRow(v));
+            } else {
+                // REAL: ask Mule for the snapshot (Named Credential: Mule_Vehicle_API)
+                rows = fetchSnapshotFromMule(accountId);
+                // If Mule returns empty/partial, UI still renders rows=0; PE pipeline persists real-time updates.
+            }
 
             InitResult res = new InitResult();
             res.mode = 'SNAPSHOT';
@@ -158,12 +181,22 @@ public with sharing class ConnectedVehicleDashboardCtrl {
             return res;
 
         } else {
-            // PAGINATED: first page from DB
+            // ---------- PAGINATED (first page) ----------
             PageToken pt = null;
             List<Vehicle__c> page = queryVehiclePage(accountId, pageSize, pt);
 
             List<VehicleRow> out = new List<VehicleRow>();
-            for (Vehicle__c v : page) out.add(toRow(v));
+            if (useMock()) {
+                // DEMO:
+                for (Vehicle__c v : page) out.add(toRow(v));
+            } else {
+                // REAL: get latest statuses for just this page from Mule
+                Map<String, VehicleRow> statuses = fetchStatusesByVins(vinsOf(page));
+                for (Vehicle__c v : page) {
+                    VehicleRow r = statuses.get(v.VIN__c);
+                    out.add((r != null) ? r : toRow(v)); // fallback to local if Mule had no entry
+                }
+            }
 
             String nextTok = page.isEmpty() ? null
                 : encodeTok(page.get(page.size()-1).VIN__c, page.get(page.size()-1).Id, accountId);
@@ -187,13 +220,15 @@ public with sharing class ConnectedVehicleDashboardCtrl {
         if (accountId == null) throw new AuraHandledException('AccountId is required.');
         Integer pageSize = normalizePageSize(pageSizeOpt);
 
+        // Versioned page key
         String cacheKey = pageKey(accountId, pageSize, pageTokenB64);
         PageResult cached = (PageResult) cacheGet(cacheKey);
         if (cached != null) { cached.fromCache = true; return cached; }
 
+        // Decode token and validate version: tokens from older versions are ignored (restart pagination)
         PageToken pt = decodeTok(pageTokenB64);
         if (pt != null && pt.ver != null && pt.ver != acctVersion(accountId)) {
-            pt = null; // force restart
+            pt = null; // force restart (version changed due to updates)
         }
 
         List<Vehicle__c> page = queryVehiclePage(accountId, pageSize, pt);
@@ -209,7 +244,16 @@ public with sharing class ConnectedVehicleDashboardCtrl {
             return res;
         }
 
-        for (Vehicle__c v : page) res.vehicles.add(toRow(v));
+        if (useMock()) {
+            for (Vehicle__c v : page) res.vehicles.add(toRow(v));
+        } else {
+            Map<String, VehicleRow> statuses = fetchStatusesByVins(vinsOf(page));
+            for (Vehicle__c v : page) {
+                VehicleRow r = statuses.get(v.VIN__c);
+                res.vehicles.add((r != null) ? r : toRow(v)); // local fallback
+            }
+        }
+
         res.nextToken = encodeTok(page.get(page.size()-1).VIN__c, page.get(page.size()-1).Id, accountId);
 
         cachePut(cacheKey, res, cacheTtl());
@@ -220,8 +264,8 @@ public with sharing class ConnectedVehicleDashboardCtrl {
     private static VehicleRow toRow(Vehicle__c v) {
         VehicleRow r = new VehicleRow();
         r.vin = v.VIN__c;
-        r.fuelLevelPct = (Integer) v.FuelLevelPct__c;
-        r.mileageKm = (Integer) v.MileageKm__c;
+        r.fuelLevelPct = (v.FuelLevelPct__c == null) ? null : ((Decimal) v.FuelLevelPct__c).intValue();
+        r.mileageKm = (v.MileageKm__c == null) ? null : ((Decimal) v.MileageKm__c).intValue();
         r.softwareVersion = v.SoftwareVersion__c;
         r.sourceTs = v.LastStatusTs__c;
         return r;
@@ -230,6 +274,12 @@ public with sharing class ConnectedVehicleDashboardCtrl {
     private static Integer normalizePageSize(Integer p) {
         Integer d = (p == null || p <= 0) ? pageSizeDefault() : p;
         return Math.min(d, PAGE_SIZE_MAX);
+    }
+
+    private static Set<String> vinsOf(List<Vehicle__c> recs) {
+        Set<String> vins = new Set<String>();
+        for (Vehicle__c v : recs) if (String.isNotBlank(v.VIN__c)) vins.add(v.VIN__c);
+        return vins;
     }
 
     private static List<Vehicle__c> queryVehiclePage(Id accountId, Integer size, PageToken pt) {
@@ -252,6 +302,68 @@ public with sharing class ConnectedVehicleDashboardCtrl {
                 LIMIT :size
             ];
         }
+    }
+
+    // ---------- Mule callouts (REAL path via Named Credential) ----------
+    // Full snapshot for Account (used only when total <= threshold and cache-miss)
+    private static List<VehicleRow> fetchSnapshotFromMule(Id accountId) {
+        HttpRequest req = new HttpRequest();
+        req.setMethod('GET');
+        req.setEndpoint('callout:Mule_Vehicle_API/api/vehicle-status/bulk?accountId=' + accountId);
+        req.setTimeout(5000);
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+        if (res == null || res.getStatusCode() < 200 || res.getStatusCode() >= 300) {
+            // Fail-soft: return empty list; UI still renders (may show zero rows until PE updates persist)
+            return new List<VehicleRow>();
+        }
+        List<Object> raw = (List<Object>) System.JSON.deserializeUntyped(res.getBody());
+        List<VehicleRow> out = new List<VehicleRow>();
+        for (Object o : raw) out.add(mapToRow((Map<String, Object>) o));
+        return out;
+    }
+
+    // Page statuses for VINs (used in PAGINATED on cache-miss)
+    private static Map<String, VehicleRow> fetchStatusesByVins(Set<String> vins) {
+        Map<String, VehicleRow> out = new Map<String, VehicleRow>();
+        if (vins == null || vins.isEmpty()) return out;
+
+        HttpRequest req = new HttpRequest();
+        req.setMethod('POST');
+        req.setEndpoint('callout:Mule_Vehicle_API/api/vehicle-status/by-vins');
+        req.setHeader('Content-Type','application/json');
+        req.setTimeout(5000);
+        req.setBody(JSON.serialize(vins));
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+        if (res == null || res.getStatusCode() < 200 || res.getStatusCode() >= 300) return out;
+
+        List<Object> raw = (List<Object>) System.JSON.deserializeUntyped(res.getBody());
+        for (Object o : raw) {
+            VehicleRow r = mapToRow((Map<String, Object>) o);
+            if (String.isNotBlank(r.vin)) out.put(r.vin, r);
+        }
+        return out;
+    }
+
+    // Map raw Mule JSON row → VehicleRow (robust casting)
+    private static VehicleRow mapToRow(Map<String, Object> m) {
+        VehicleRow r = new VehicleRow();
+        r.vin = (String) m.get('vin');
+        if (m.containsKey('fuelLevelPct') && m.get('fuelLevelPct') != null)
+            r.fuelLevelPct = ((Decimal) m.get('fuelLevelPct')).intValue();
+        if (m.containsKey('mileageKm') && m.get('mileageKm') != null)
+            r.mileageKm = ((Decimal) m.get('mileageKm')).intValue();
+        r.softwareVersion = (String) m.get('softwareVersion');
+
+        // Accept either Datetime or ISO string; if not present, default to now.
+        // deserializeUntyped may give DateTime for ISO8601. If not, use System.now().
+        Datetime ts = System.now();
+        Object rawTs = m.get('ts');
+        if (rawTs instanceof Datetime) ts = (Datetime) rawTs;
+        r.sourceTs = ts;
+
+        return r;
     }
 
     // ---------- Token helpers (embed version to avoid cross-version reuse) ----------
