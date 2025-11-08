@@ -1,0 +1,31 @@
+.table-wrap {
+    min-height: 160px;
+    position: relative;
+  }
+  
+  /* overlay still covers full table, content pinned lower */
+  .spinner-overlay {
+    inset: 0;
+    z-index: 1;
+    background: rgba(255, 255, 255, 0.35);
+    pointer-events: none;
+    display: flex;
+    justify-content: center;  /* horizontally center the container */
+  }
+  
+  /* center horizontally, move slightly down */
+  .spinner-top .spinner-anchor {
+    position: absolute;
+    top: 60px; /* lower the spinner to appear below table headers */
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  
+  /* spacing between spinner and text */
+  .loading-text {
+    margin-top: 64px; /*text is below the spinner */
+  }
+  

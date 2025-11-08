@@ -27,23 +27,33 @@
         </div>
       </div>
   
-      <!-- Data table (no infinite loading attributes) -->
-      <lightning-datatable
-        key-field="vin"
-        data={rows}
-        columns={columns}
-        hide-checkbox-column
-        show-row-number-column
-      >
-      </lightning-datatable>
+      <!-- Data table + Spinner -->
+      <div class="table-wrap slds-is-relative" aria-busy={showSpinner} aria-live="polite">
+        <lightning-datatable
+          key-field="vin"
+          data={rows}
+          columns={columns}
+          hide-checkbox-column
+          show-row-number-column
+        ></lightning-datatable>
+      
+        <template if:true={showSpinner}>
+            <div class="spinner-overlay spinner-top slds-is-absolute slds-text-align_center">
+              <div class="spinner-anchor">
+                <lightning-spinner
+                  alternative-text="Loading vehicles"
+                  size="medium"
+                ></lightning-spinner>
+                <div class="loading-text slds-m-top_small slds-text-body_small slds-text-title_bold">
+                  {spinnerText}
+                </div>
+              </div>
+            </div>
+          </template>
+      </div>
+      
   
       <!-- Status messages -->
-      <template if:true={isLoadingInitial}>
-        <div class="slds-p-around_small slds-text-body_small slds-text-color_weak">Loading…</div>
-      </template>
-      <template if:true={isLoadingMore}>
-        <div class="slds-p-around_small slds-text-body_small slds-text-color_weak">Loading more…</div>
-      </template>
       <template if:true={noMoreData}>
         <div class="slds-p-around_small slds-text-body_small slds-text-color_weak">All vehicles loaded.</div>
       </template>

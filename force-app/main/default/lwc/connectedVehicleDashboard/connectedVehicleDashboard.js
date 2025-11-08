@@ -52,7 +52,14 @@ export default class ConnectedVehicleDashboard extends LightningElement {
   get disableLoadMore() {
     return this.noMoreData || this.isLoadingMore || !this.isPaginated;
   }
-  
+
+  get showSpinner() {
+    return this.isLoadingInitial || this.isLoadingMore;
+  }
+
+  get spinnerText() {
+    return this.isLoadingMore ? 'Loading more vehicles…' : 'Loading vehicles…';
+  }
 
   async init() {
     this.isLoadingInitial = true;
