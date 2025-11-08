@@ -306,4 +306,86 @@ private class ConnectedVehicleDashboardCtrlTests {
         }
         System.assert(threw, 'Expected AuraHandledException for null accountId');
     }
+
+    @IsTest
+    static void hashToken_and_pageKey_variants_areStable() {
+        Account a = getAcct();
+
+        // Ask first page so a cache key is formed internally (even if cache is off)
+        Integer pageSize = 3;
+        ConnectedVehicleDashboardCtrl.PageResult p1 =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, pageSize, null, 'h1');
+        System.assertNotEquals(null, p1);
+
+        // Indirectly exercise hashToken('FIRST') path by calling with blank token again
+        ConnectedVehicleDashboardCtrl.PageResult p1Again =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, pageSize, '', 'h2');
+        System.assertNotEquals(null, p1Again);
+        System.assertEquals(p1.vehicles[0].vin, p1Again.vehicles[0].vin,
+            'Same first page when token is blank or null.');
+
+        // Call once more with some bogus token; controller will decode/validate and
+        // either restart (if version mismatch) or continue. We only assert no throw.
+        ConnectedVehicleDashboardCtrl.PageResult pBogus =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, pageSize, 'not-base64', 'h3');
+        System.assertNotEquals(null, pBogus, 'Gracefully handles invalid token input.');
+    }
+
+    @IsTest
+    static void acctVersion_defaultsTo1_and_affects_tokens() {
+        Account a = getAcct();
+
+        // First page → produces a nextToken embedding version (likely 1 if no cache write)
+        ConnectedVehicleDashboardCtrl.PageResult p1 =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, 2, null, 'v1');
+        System.assertNotEquals(null, p1);
+        System.assertNotEquals(null, p1.nextToken);
+
+        // If Platform Cache is available, bump version to force a restart behavior for the same token.
+        Boolean cacheOk = isCacheAvailable();
+        if (cacheOk) {
+            try {
+                Cache.OrgPartition part = Cache.Org.getPartition('ConnectedVehicles');
+                Object curr = part.get('acct' + String.valueOf(a.Id) + ':ver'); // may be null
+                Integer nextVer = (curr == null) ? 2 : ((Integer) curr) + 1;
+                part.put('acct' + String.valueOf(a.Id) + ':ver', nextVer, 86400);
+            } catch (Exception ignore) {}
+        }
+
+        // Reuse the same token. If cache version changed, controller restarts paging (token invalid).
+        ConnectedVehicleDashboardCtrl.PageResult p2 =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, 2, p1.nextToken, 'v2');
+        System.assertNotEquals(null, p2);
+        System.assertEquals(2, p2.vehicles.size());
+
+        if (cacheOk) {
+            // Restarted → first page VIN is V0001 again
+            System.assertEquals('V0001', p2.vehicles[0].vin);
+        } else {
+            // No cache version change → continued → first VIN is V0003
+            System.assertEquals('V0003', p2.vehicles[0].vin);
+        }
+    }
+
+    // Covers normalizePageSize() with edge values (0, negative, and extremely large)
+    @IsTest
+    static void normalizePageSize_edges_doNotThrow() {
+        Account a = getAcct();
+
+        // Zero → default
+        ConnectedVehicleDashboardCtrl.PageResult pZero =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, 0, null, 'n0');
+        System.assertNotEquals(null, pZero);
+
+        // Negative → default
+        ConnectedVehicleDashboardCtrl.PageResult pNeg =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, -10, null, 'n1');
+        System.assertNotEquals(null, pNeg);
+
+        // Very large → capped by PAGE_SIZE_MAX
+        ConnectedVehicleDashboardCtrl.PageResult pHuge =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, 500000, null, 'n2');
+        System.assertNotEquals(null, pHuge);
+    }
+
 }
