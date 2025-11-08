@@ -23,6 +23,61 @@ private class ConnectedVehicleDashboardCtrlTests {
         return [SELECT Id, Name FROM Account WHERE Name = 'Champion Motors Test' LIMIT 1];
     }
 
+    // Ensure we have at least `target` connected vehicles for the Account,
+    // using VINs that won’t collide with your snapshot set (V0001..V0010).
+    // VIN pattern we add: VPAG-000001..NNNNNN
+    private static void ensureBulkVehicles(Id accountId, Integer target) {
+        // Count current connected vehicles
+        Integer existing = [
+            SELECT COUNT()
+            FROM Vehicle__c
+            WHERE Account__c = :accountId AND IsConnected__c = true
+        ];
+        Integer toAdd = target - existing;
+        if (toAdd <= 0) return;
+
+        // Find the current max VPAG index to avoid duplicate VINs
+        Integer startIdx = 0;
+        List<Vehicle__c> vpags = [
+            SELECT VIN__c
+            FROM Vehicle__c
+            WHERE Account__c = :accountId AND VIN__c LIKE 'VPAG-%'
+            ORDER BY VIN__c DESC
+            LIMIT 1
+        ];
+        if (!vpags.isEmpty()) {
+            String lastVin = vpags[0].VIN__c; // e.g., "VPAG-000123"
+            if (lastVin != null && lastVin.length() > 5) {
+                // After 'VPAG-' (length 5)
+                String tail = lastVin.substring(5);
+                Integer parsed = 0;
+                try { parsed = Integer.valueOf(tail); } catch (Exception ignore) {}
+                startIdx = parsed;
+            }
+        }
+
+        List<Vehicle__c> toInsert = new List<Vehicle__c>();
+        for (Integer i = 1; i <= toAdd; i++) {
+            Integer n = startIdx + i;
+
+            // Build 6-digit zero-padded string manually
+            String num = String.valueOf(n);
+            while (num.length() < 6) num = '0' + num;
+
+            String vin = 'VPAG-' + num;
+            toInsert.add(new Vehicle__c(
+                Account__c         = accountId,
+                IsConnected__c     = true,
+                VIN__c             = vin,
+                FuelLevelPct__c    = 10,
+                MileageKm__c       = 100,
+                SoftwareVersion__c = 'v0',
+                LastStatusTs__c    = System.now().addDays(-10)
+            ));
+        }
+        insert toInsert;
+    }
+
     // -----------------------------
     // Seed data
     // -----------------------------
@@ -34,7 +89,7 @@ private class ConnectedVehicleDashboardCtrlTests {
         // Deterministic VINs: V0001..V0010
         List<Vehicle__c> vs = new List<Vehicle__c>();
         for (Integer i = 1; i <= 10; i++) {
-            String vin = 'V' + String.valueOf(10000 + i).substring(1);
+            String vin = 'V' + String.valueOf(10000 + i).substring(1); // V0001..V0010
             vs.add(new Vehicle__c(
                 Account__c         = a.Id,
                 IsConnected__c     = true,
@@ -183,5 +238,72 @@ private class ConnectedVehicleDashboardCtrlTests {
             // Without cache (version fixed at 1), token remains valid → continue to next page
             System.assertEquals('V0004', next.vehicles[0].vin);
         }
+    }
+
+    // -----------------------------
+    // Additional coverage tests
+    // -----------------------------
+
+    // Forces initDashboard into PAGINATED mode by ensuring > threshold vehicles exist.
+    @IsTest
+    static void initDashboard_returnsPaginated_whenOverThreshold() {
+        Account a = getAcct();
+
+        // Ensure we have at least 520 connected vehicles for this account
+        ensureBulkVehicles(a.Id, 520);
+
+        Test.startTest();
+        ConnectedVehicleDashboardCtrl.InitResult res =
+            ConnectedVehicleDashboardCtrl.initDashboard(a.Id, null, 'nonce-pag');
+        Test.stopTest();
+
+        System.assertEquals('PAGINATED', res.mode, 'Expected PAGINATED when total > threshold');
+        System.assertNotEquals(null, res.snapshot, 'First page should be present in snapshot');
+        System.assert(res.snapshot.size() > 0, 'First page should not be empty');
+        System.assertNotEquals(null, res.nextToken, 'Should return a nextToken for subsequent pages');
+        System.assertEquals(false, res.fromCache, 'First build should not be from cache');
+    }
+
+    // Verifies page size is capped internally (PAGE_SIZE_MAX) even if caller requests a huge page.
+    @IsTest
+    static void getVehiclesPage_capsPageSizeAtMax() {
+        Account a = getAcct();
+
+        // Ensure plenty of rows exist
+        ensureBulkVehicles(a.Id, 520);
+
+        Integer huge = 50000; // absurd request; controller should cap
+        Test.startTest();
+        ConnectedVehicleDashboardCtrl.PageResult p =
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(a.Id, huge, null, 'nonce-cap');
+        Test.stopTest();
+
+        System.assertNotEquals(null, p);
+        System.assert(p.vehicles.size() > 0, 'Should return rows even with huge requested page size');
+        System.assertNotEquals(null, p.nextToken, 'Should support paging with capped size');
+    }
+
+    // Guardrail: initDashboard with null account throws AuraHandledException
+    @IsTest
+    static void initDashboard_nullAccount_throws() {
+        Boolean threw = false;
+        try {
+            ConnectedVehicleDashboardCtrl.initDashboard(null, 3, 'nonce-null');
+        } catch (AuraHandledException e) {
+            threw = true;
+        }
+        System.assert(threw, 'Expected AuraHandledException for null accountId');
+    }
+
+    // Guardrail: getVehiclesPage with null account throws AuraHandledException
+    @IsTest
+    static void getVehiclesPage_nullAccount_throws() {
+        Boolean threw = false;
+        try {
+            ConnectedVehicleDashboardCtrl.getVehiclesPage(null, 3, null, 'nonce-null2');
+        } catch (AuraHandledException e) {
+            threw = true;
+        }
+        System.assert(threw, 'Expected AuraHandledException for null accountId');
     }
 }
