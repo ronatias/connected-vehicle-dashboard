@@ -1,18 +1,75 @@
-# Salesforce DX Project: Next Steps
+# 🚗 Connected Vehicle Dashboard
 
-Now that you’ve created a Salesforce DX project, what’s next? Here are some documentation resources to get you started.
+### Real-Time Telemetry Visualization for Champion Motors
 
-## How Do You Plan to Deploy Your Changes?
+The **Connected Vehicle Dashboard** is a Salesforce-based solution designed to display and manage live vehicle telemetry data — including **fuel level**, **mileage**, and **software version** — for all connected vehicles owned by a customer.  
+It integrates with **MuleSoft APIs** and **Salesforce Platform Events** to deliver **real-time updates**, **optimized caching**, and **scalable performance** across tens of thousands of concurrent users.
 
-Do you want to deploy a set of changes, or create a self-contained application? Choose a [development model](https://developer.salesforce.com/tools/vscode/en/user-guide/development-models).
+---
 
-## Configure Your Salesforce DX Project
+## ✨ Key Features
+- **Real-Time Updates:**  
+  Vehicle data is automatically refreshed via **Platform Events** (`Vehicle_Status__e`) without page reloads.
 
-The `sfdx-project.json` file contains useful configuration information for your project. See [Salesforce DX Project Configuration](https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/sfdx_dev_ws_config.htm) in the _Salesforce DX Developer Guide_ for details about this file.
+- **Hybrid Caching Strategy:**  
+  Uses **Platform Cache** for per-account caching, minimizing redundant API calls while keeping data fresh.
 
-## Read All About It
+- **Snapshot & Pagination Modes:**  
+  Automatically switches between full-snapshot and keyset-pagination modes based on the number of vehicles per account.
 
-- [Salesforce Extensions Documentation](https://developer.salesforce.com/tools/vscode/)
-- [Salesforce CLI Setup Guide](https://developer.salesforce.com/docs/atlas.en-us.sfdx_setup.meta/sfdx_setup/sfdx_setup_intro.htm)
-- [Salesforce DX Developer Guide](https://developer.salesforce.com/docs/atlas.en-us.sfdx_dev.meta/sfdx_dev/sfdx_dev_intro.htm)
-- [Salesforce CLI Command Reference](https://developer.salesforce.com/docs/atlas.en-us.sfdx_cli_reference.meta/sfdx_cli_reference/cli_reference.htm)
+- **EMP API Integration:**  
+  The LWC subscribes to `/event/Vehicle_Status__e` for instant row-level UI updates.
+
+- **Scalable Architecture:**  
+  Bulk-safe Apex logic, TTL-based cache expiration, and account-level versioning ensure efficiency at scale.
+
+- **Configurable Behavior:**  
+  All thresholds and cache settings are managed via **Custom Metadata Type** (`ConnectedVehicleSettings__mdt`).
+
+---
+
+## 📄 Documentation
+
+### 📘 [Connected Vehicle Dashboard – Technical Design Document](https://docs.google.com/document/d/124wvWIvtMQWgmVvuC3-MrDPNAi85fytG6iMkkdtiXEs/edit?usp=sharing)
+Comprehensive architecture and design explanation covering:
+- Data flow  
+- Platform Event integration  
+- Cache and performance strategy  
+- Scalability and governance model  
+*(Author: Ronen Atias-Koliran)*
+
+---
+
+### 🧭 [Connected Vehicle Dashboard – Demo Operation Guide](https://docs.google.com/document/d/1-ZXMuu3Rw8nAW-uhfJWRnJ2Gn9D9ib23nVTkCnAQHfw/edit?usp=sharing)
+Step-by-step demo instructions for operating the Connected Vehicle Dashboard, including:
+- Login details for the demo org  
+- How to access and run the dashboard  
+- Platform Event test script for live updates  
+- How to experiment with snapshot/pagination modes  
+
+---
+
+## 🧩 Components Overview
+
+| Layer | Component | Purpose |
+|--------|------------|----------|
+| **UI Layer** | `connectedVehicleDashboard` (LWC) | Displays live telemetry and handles real-time updates |
+| **Service Layer** | `ConnectedVehicleDashboardCtrl` (Apex) | Serves data, caching, pagination logic |
+| **Integration Layer** | `Vehicle_Status__e` | Receives telemetry from MuleSoft |
+| **Handler Layer** | `VehicleStatusHandler` | Processes Platform Events and updates `Vehicle__c` records |
+| **Data Layer** | `Vehicle__c`, `ConnectedVehicleSettings__mdt` | Stores and configures vehicle data and cache rules |
+
+---
+
+## 🛠️ Setup Notes
+- Platform Cache partition name: **`ConnectedVehicles`**  
+- Platform Event: **`Vehicle_Status__e`**  
+- Named Credential (for future integration): **`Mule_Vehicle_API`**  
+- Default Account for demo: **Champion Motors – Demo**  
+- LWC is exposed under **Account → Details tab**
+
+---
+
+## 👤 Author
+**Ronen Atias-Koliran**  
+
